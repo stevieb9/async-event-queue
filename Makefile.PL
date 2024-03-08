@@ -31,6 +31,7 @@ my %WriteMakefileArgs = (
     },
     PREREQ_PM => {
         'Async::Event::Interval'    => '1.13',
+        'Script::Singleton'         => '0',
     },
     dist  => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
     clean => { FILES => 'Async-Event-Queue-*' },

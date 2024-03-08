@@ -3,15 +3,46 @@ package Async::Event::Queue;
 use strict;
 use warnings;
 
+BEGIN { use IPC::Shareable; print IPC::Shareable::ipcs() . "\n"; }
+
 use Async::Event::Interval;
 use Carp qw(croak);
+use Cwd qw(abs_path);
+use Data::Dumper;
+#use Script::Singleton warn => 1;
 
 our $VERSION = '0.01';
 
+my $queue_glue = abs_path((caller())[1]) . "_queue2";
+
+tie my @queue, 'IPC::Shareable', {
+    key     => $queue_glue,
+    create  => 1,
+    tidy    => 1,
+    destroy => 1,
+};
+
+my @procs;
+
+sub _core_cb {
+    my (@procs) = @_;
+
+    tie my @queue, 'IPC::Shareable', {
+        key     => $queue_glue,
+        create  => 0,
+    };
+
+    for my $proc (@procs) {
+        if ($proc->waiting) {
+            if (my $queue_item = shift @queue) {
+                $proc->start($queue_item->[0]);
+            }
+        }
+    }
+}
+
 sub new {
     my ($class, $callback, $num_procs) = @_;
-
-    $num_procs //= 4;
 
     if (! defined $callback || ref $callback ne 'CODE') {
         croak "new() requires a code reference sent in";
@@ -19,23 +50,44 @@ sub new {
 
     my $self = bless {}, $class;
 
-    $self->num_procs($num_procs);
+    $self->num_procs($num_procs // 2);
     $self->_cb($callback);
+
+    $self->_procs_create;
+    $self->_core_proc;
+
+    $self->_core_proc->start;
 
     return $self;
 }
+sub waiting {
+    my ($self) = @_;
+    return $self->_core_proc->waiting;
+}
+sub _core_proc {
+    my ($self) = @_;
+    if (! $self->{core_proc}) {
+        $self->{core_proc} = Async::Event::Interval->new(1, \&_core_cb, @procs);
+    }
+    return $self->{core_proc};
+}
+sub halt {
+    my ($self) = @_;
+
+    for my $proc (@procs) {
+        $proc->stop;
+    }
+
+    $self->_core_proc->stop;
+}
 sub enqueue {
     my ($self, @data) = @_;
-    push @{ $self->{queue} }, \@data;
-}
-sub dequeue {
-    my ($self) = @_;
-    return shift @{ $self->{queue} };
+    push @queue, \@data;
 }
 sub num_procs {
     my ($self, $num_procs) = @_;
 
-    if (! defined $num_procs || $num_procs !~ /^\d+$/) {
+    if (defined $num_procs && $num_procs !~ /^\d+$/) {
         croak "num_procs() requires an integer number of processes to start";
     }
 
@@ -45,9 +97,9 @@ sub num_procs {
 
     return $self->{num_procs};
 }
-sub queue {
+sub queue_items {
     my ($self) = @_;
-    return $self->{queue};
+    return @queue;
 }
 
 sub _cb {
@@ -59,9 +111,27 @@ sub _cb {
 
     return $self->{cb};
 }
+sub _proc_store {
+    my ($self, $proc) = @_;
+
+    if (! $proc || ref $proc ne 'Async::Event::Interval') {
+        croak "_proc_store() must be sent in an object of Async::Event::Interval";
+    }
+
+    push @procs, $proc;
+}
 sub _procs_create {
     my ($self) = @_;
+
+    for (1..$self->num_procs) {
+        $self->_proc_store(
+            Async::Event::Interval->new(0, $self->_cb)
+        )
+    }
 }
+    # Put all procs in a hash { id => $event }
+    # When event is done, push to array (@{ $self->done })
+    # When looping globally, shift $self->done, and start $event with next queue
 
 sub __placeholder {}
 
